@@ -2,7 +2,7 @@
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
-use crate::bindings::*;
+use crate::minimal_bindings::*;
 use crate::model::Model;
 use crate::tensor;
 use crate::tensor::Tensor;
@@ -119,8 +119,11 @@ impl<'a> Interpreter<'a> {
             {
                 if let Some(options) = options.as_ref() {
                     if options.is_xnnpack_enabled {
-                        xnnpack_delegate_ptr =
-                            Some(Interpreter::configure_xnnpack(options, options_ptr));
+                        let delegate_ptr = Interpreter::configure_xnnpack(options, options_ptr);
+                        // Only store the delegate pointer if it's not null
+                        if !delegate_ptr.is_null() {
+                            xnnpack_delegate_ptr = Some(delegate_ptr);
+                        }
                     }
                 }
             }
@@ -129,6 +132,7 @@ impl<'a> Interpreter<'a> {
             let model_ptr = model.model_ptr as *const TfLiteModel;
             let interpreter_ptr = TfLiteInterpreterCreate(model_ptr, options_ptr);
             TfLiteInterpreterOptionsDelete(options_ptr);
+
             if interpreter_ptr.is_null() {
                 Err(Error::new(ErrorKind::FailedToCreateInterpreter))
             } else {
@@ -159,7 +163,7 @@ impl<'a> Interpreter<'a> {
     ///
     /// Returns error if TensorFlow Lite C fails to invoke.
     pub fn invoke(&self) -> Result<()> {
-        if TfLiteStatus_kTfLiteOk == unsafe { TfLiteInterpreterInvoke(self.interpreter_ptr) } {
+        if TfLiteStatus::kTfLiteOk == unsafe { TfLiteInterpreterInvoke(self.interpreter_ptr) } {
             Ok(())
         } else {
             Err(Error::new(ErrorKind::AllocateTensorsRequired))
@@ -251,7 +255,7 @@ impl<'a> Interpreter<'a> {
             .collect::<Vec<i32>>();
 
         unsafe {
-            if TfLiteStatus_kTfLiteOk
+            if TfLiteStatus::kTfLiteOk
                 == TfLiteInterpreterResizeInputTensor(
                     self.interpreter_ptr,
                     index as i32,
@@ -277,12 +281,16 @@ impl<'a> Interpreter<'a> {
     /// Returns error if TensorFlow Lite C fails to allocate memory
     /// for the input tensors.
     pub fn allocate_tensors(&self) -> Result<()> {
-        if TfLiteStatus_kTfLiteOk
-            == unsafe { TfLiteInterpreterAllocateTensors(self.interpreter_ptr) }
-        {
-            Ok(())
-        } else {
-            Err(Error::new(ErrorKind::FailedToAllocateTensors))
+        match unsafe { TfLiteInterpreterAllocateTensors(self.interpreter_ptr) } {
+            TfLiteStatus::kTfLiteOk => {
+                // Remove spam logging - this was printing on every audio chunk
+                // println!("🔍 Tensor allocation succeeded - checking for XNNPACK acceleration...");
+                Ok(())
+            }
+            status => {
+                println!("❌ Tensor allocation FAILED with status: {:?}", status);
+                Err(Error::new(ErrorKind::FailedToAllocateTensors))
+            }
         }
     }
 
@@ -314,7 +322,7 @@ impl<'a> Interpreter<'a> {
             }
             let status =
                 TfLiteTensorCopyFromBuffer(tensor_ptr, data.as_ptr() as *const c_void, data.len());
-            if status != TfLiteStatus_kTfLiteOk {
+            if status != TfLiteStatus::kTfLiteOk {
                 Err(Error::new(ErrorKind::FailedToCopyDataToInputTensor))
             } else {
                 Ok(())
@@ -352,13 +360,40 @@ impl<'a> Interpreter<'a> {
         options: &Options,
         interpreter_options_ptr: *mut TfLiteInterpreterOptions,
     ) -> *mut TfLiteDelegate {
-        let mut xnnpack_options = TfLiteXNNPackDelegateOptionsDefault();
-        if options.thread_count > 0 {
-            xnnpack_options.num_threads = options.thread_count
+        println!("🔧 Creating XNNPACK delegate with v2.19.0 library...");
+
+        // Use the library's default XNNPACK options (includes proper flags)
+        let mut xnnpack_options = unsafe { TfLiteXNNPackDelegateOptionsDefault() };
+        // Override just the thread count to match our settings
+        xnnpack_options.num_threads = options.thread_count as c_int;
+        
+        // Explicitly enable quantized inference flags (commonly needed for models)
+        xnnpack_options.flags |= TFLITE_XNNPACK_DELEGATE_FLAG_QS8 | TFLITE_XNNPACK_DELEGATE_FLAG_QU8;
+        
+        // Try enabling additional flags that might help with dynamic tensors and newer operators
+        xnnpack_options.flags |= TFLITE_XNNPACK_DELEGATE_FLAG_ENABLE_SUBGRAPH_RESHAPING;
+        xnnpack_options.flags |= TFLITE_XNNPACK_DELEGATE_FLAG_ENABLE_LATEST_OPERATORS;
+
+        println!(
+            "🔧 Using XNNPACK options: threads={}, flags={}, weights_cache={:?}, handle_variable_ops={}, weight_cache_file_path={:?}",
+            xnnpack_options.num_threads, 
+            xnnpack_options.flags,
+            xnnpack_options.weights_cache,
+            xnnpack_options.handle_variable_ops,
+            xnnpack_options.weight_cache_file_path
+        );
+
+        let xnnpack_delegate_ptr = unsafe { TfLiteXNNPackDelegateCreate(&xnnpack_options) };
+        println!("🔧 XNNPACK delegate created: {:?}", xnnpack_delegate_ptr);
+
+        if !xnnpack_delegate_ptr.is_null() {
+            println!("🔧 Adding XNNPACK delegate to interpreter options...");
+            TfLiteInterpreterOptionsAddDelegate(interpreter_options_ptr, xnnpack_delegate_ptr);
+            println!("✅ XNNPACK delegate added successfully!");
+        } else {
+            println!("❌ XNNPACK delegate creation failed - delegate is null");
         }
 
-        let xnnpack_delegate_ptr = TfLiteXNNPackDelegateCreate(&xnnpack_options);
-        TfLiteInterpreterOptionsAddDelegate(interpreter_options_ptr, xnnpack_delegate_ptr);
         xnnpack_delegate_ptr
     }
 }

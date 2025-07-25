@@ -7,7 +7,7 @@
 //! let model = Model::new("tests/add.bin")?;
 //! # Ok::<(), tflitec::Error>(())
 //! ```
-use crate::bindings::{
+use crate::minimal_bindings::{
     TfLiteModel, TfLiteModelCreate, TfLiteModelCreateFromFile, TfLiteModelDelete,
 };
 use crate::{Error, ErrorKind, Result};
