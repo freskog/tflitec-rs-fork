@@ -283,8 +283,6 @@ impl<'a> Interpreter<'a> {
     pub fn allocate_tensors(&self) -> Result<()> {
         match unsafe { TfLiteInterpreterAllocateTensors(self.interpreter_ptr) } {
             TfLiteStatus::kTfLiteOk => {
-                // Remove spam logging - this was printing on every audio chunk
-                // println!("🔍 Tensor allocation succeeded - checking for XNNPACK acceleration...");
                 Ok(())
             }
             status => {
